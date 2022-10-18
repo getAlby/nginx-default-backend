@@ -1,1 +1,1 @@
-500 json
+{ "error": true, "message": "Something went wrong" }
