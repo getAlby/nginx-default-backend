@@ -77,6 +77,9 @@ func init() {
 }
 
 func main() {
+	// Configure logger to output raw JSON without timestamp prefix for Datadog
+	log.SetFlags(0)
+	
 	errFilesPath := "/www"
 	if os.Getenv(ErrFilesPathVar) != "" {
 		errFilesPath = os.Getenv(ErrFilesPathVar)
