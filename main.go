@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -76,6 +77,9 @@ func init() {
 }
 
 func main() {
+	// Configure logger to output raw JSON without timestamp prefix for Datadog
+	log.SetFlags(0)
+	
 	errFilesPath := "/www"
 	if os.Getenv(ErrFilesPathVar) != "" {
 		errFilesPath = os.Getenv(ErrFilesPathVar)
@@ -107,6 +111,28 @@ func errorHandler(path, defaultFormat string) func(http.ResponseWriter, *http.Re
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		ext := defaultExt
+		var logJSON []byte // Declare logJSON variable for reuse throughout function
+
+		// Log request details in JSON format with debug level
+		requestLog := map[string]interface{}{
+			"timestamp":    start.Format(time.RFC3339),
+			"level":        "debug", // Set log level to debug for Datadog categorization
+			"method":       r.Method,
+			"path":         r.URL.Path,
+			"query":        r.URL.RawQuery,
+			"host":         r.Host,
+			"remote_addr":  r.RemoteAddr,
+			"user_agent":   r.Header.Get("User-Agent"),
+			"original_uri": r.Header.Get(OriginalURI),
+			"namespace":    r.Header.Get(Namespace),
+			"ingress_name": r.Header.Get(IngressName),
+			"service_name": r.Header.Get(ServiceName),
+			"service_port": r.Header.Get(ServicePort),
+			"request_id":   r.Header.Get(RequestId),
+			"x_code":       r.Header.Get(CodeHeader),
+			"x_format":     r.Header.Get(FormatHeader),
+			"accept":       r.Header.Get("Accept"),
+		}
 
 		if os.Getenv("DEBUG") != "" {
 			w.Header().Set(FormatHeader, r.Header.Get(FormatHeader))
@@ -123,25 +149,75 @@ func errorHandler(path, defaultFormat string) func(http.ResponseWriter, *http.Re
 		format := r.Header.Get(FormatHeader)
 		if format == "" {
 			format = defaultFormat
-			log.Printf("format not specified. Using %v", format)
+			if os.Getenv("DEBUG") != "" {
+				// Log debug message in JSON format for Datadog
+				debugLog := map[string]interface{}{
+					"timestamp": time.Now().Format(time.RFC3339),
+					"level":     "debug",
+					"message":   fmt.Sprintf("format not specified. Using %v", format),
+					"context":   "format_selection",
+				}
+				logJSON, _ = json.Marshal(debugLog)
+				log.Printf("%s", logJSON)
+			}
 		}
 
 		cext, err := mime.ExtensionsByType(format)
 		if err != nil {
-			log.Printf("unexpected error reading media type extension: %v. Using %v", err, ext)
+			// Log error message in JSON format for Datadog
+			errorLog := map[string]interface{}{
+				"timestamp": time.Now().Format(time.RFC3339),
+				"level":     "debug",
+				"message":   fmt.Sprintf("unexpected error reading media type extension: %v. Using %v", err, ext),
+				"context":   "mime_type_parsing",
+				"error":     err.Error(),
+			}
+			logJSON, _ = json.Marshal(errorLog)
+			log.Printf("%s", logJSON)
 			format = defaultFormat
 		} else if len(cext) == 0 {
-			log.Printf("couldn't get media type extension. Using %v", ext)
+			// Log warning message in JSON format for Datadog
+			warnLog := map[string]interface{}{
+				"timestamp": time.Now().Format(time.RFC3339),
+				"level":     "debug",
+				"message":   fmt.Sprintf("couldn't get media type extension. Using %v", ext),
+				"context":   "mime_extension_lookup",
+			}
+			logJSON, _ = json.Marshal(warnLog)
+			log.Printf("%s", logJSON)
 		} else {
 			ext = cext[0]
 		}
 		w.Header().Set(ContentType, format)
 
 		errCode := r.Header.Get(CodeHeader)
-		code, err := strconv.Atoi(errCode)
-		if err != nil {
-			code = 404
-			log.Printf("unexpected error reading return code: %v. Using %v", err, code)
+		code := 404 // Default code
+		if errCode != "" {
+			parsedCode, err := strconv.Atoi(errCode)
+			if err != nil {
+				// Log error message in JSON format for Datadog
+				errorLog := map[string]interface{}{
+					"timestamp": time.Now().Format(time.RFC3339),
+					"level":     "debug",
+					"message":   fmt.Sprintf("invalid return code %q: %v. Using %v", errCode, err, code),
+					"context":   "return_code_parsing",
+					"error":     err.Error(),
+				}
+				logJSON, _ = json.Marshal(errorLog)
+				log.Printf("%s", logJSON)
+			} else {
+				code = parsedCode
+			}
+		} else if os.Getenv("DEBUG") != "" {
+			// Log debug message in JSON format for Datadog
+			debugLog := map[string]interface{}{
+				"timestamp": time.Now().Format(time.RFC3339),
+				"level":     "debug",
+				"message":   fmt.Sprintf("return code not specified. Using %v", code),
+				"context":   "return_code_default",
+			}
+			logJSON, _ = json.Marshal(debugLog)
+			log.Printf("%s", logJSON)
 		}
 		w.WriteHeader(code)
 
@@ -155,22 +231,47 @@ func errorHandler(path, defaultFormat string) func(http.ResponseWriter, *http.Re
 		file := fmt.Sprintf("%v/%v%v", path, code, ext)
 		f, err := os.Open(file)
 		if err != nil {
-			log.Printf("unexpected error opening file: %v", err)
+			// Log error message in JSON format for Datadog
+			errorLog := map[string]interface{}{
+				"timestamp": time.Now().Format(time.RFC3339),
+				"level":     "debug",
+				"message":   fmt.Sprintf("unexpected error opening file: %v", err),
+				"context":   "file_opening",
+				"error":     err.Error(),
+			}
+			logJSON, _ = json.Marshal(errorLog)
+			log.Printf("%s", logJSON)
 			scode := strconv.Itoa(code)
 			file := fmt.Sprintf("%v/%cxx%v", path, scode[0], ext)
 			f, err := os.Open(file)
 			if err != nil {
-				log.Printf("unexpected error opening file: %v", err)
+				// Log error message in JSON format for Datadog
+				errorLog := map[string]interface{}{
+					"timestamp": time.Now().Format(time.RFC3339),
+					"level":     "debug",
+					"message":   fmt.Sprintf("unexpected error opening file: %v", err),
+					"context":   "file_opening",
+					"error":     err.Error(),
+				}
+				logJSON, _ = json.Marshal(errorLog)
+				log.Printf("%s", logJSON)
 				http.NotFound(w, r)
 				return
 			}
 			defer f.Close()
-			log.Printf("serving custom error response for code %v and format %v from file %v", code, format, file)
+			// Log info message in JSON format for Datadog
+			infoLog := map[string]interface{}{
+				"timestamp": time.Now().Format(time.RFC3339),
+				"level":     "debug",
+				"message":   fmt.Sprintf("serving custom error response for code %v and format %v from file %v", code, format, file),
+				"context":   "custom_error_response",
+			}
+			logJSON, _ = json.Marshal(infoLog)
+			log.Printf("%s", logJSON)
 			io.Copy(w, f)
 			return
 		}
 		defer f.Close()
-		log.Printf("serving custom error response for code %v and format %v from file %v", code, format, file)
 		io.Copy(w, f)
 
 		duration := time.Now().Sub(start).Seconds()
@@ -180,5 +281,18 @@ func errorHandler(path, defaultFormat string) func(http.ResponseWriter, *http.Re
 
 		requestCount.WithLabelValues(proto).Inc()
 		requestDuration.WithLabelValues(proto).Observe(duration)
+
+		// Add response details to log
+		requestLog["status_code"] = code
+		requestLog["content_type"] = format
+		requestLog["response_file"] = file
+		requestLog["duration_seconds"] = duration
+		requestLog["protocol"] = proto
+		requestLog["message"] = fmt.Sprintf("HTTP %s %s - %d", r.Method, r.URL.Path, code)
+		requestLog["context"] = "http_request"
+
+		// Output JSON log with debug level for Datadog
+		logJSON, _ = json.Marshal(requestLog)
+		log.Printf("%s", logJSON)
 	}
 }
